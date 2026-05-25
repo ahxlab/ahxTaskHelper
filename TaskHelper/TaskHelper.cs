@@ -1,9 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
-using System.IO;
-using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Logging4net;
@@ -36,35 +33,29 @@ namespace TaskHelper
     /// </summary>
     public class PersistentTaskBase
     {
-        public enum ItemCloneEnum 
+        public enum ItemCloneEnum
         {
             direct = 1,
             clone = 2,
         }
 
-        private ManualResetEvent _event = null;
-        private ConcurrentQueue<QueueObj> _queue = new ConcurrentQueue<QueueObj>();
+        // 修正(No.4): イベントとQueueをBlockingCollectionに一本化し、データの目詰まり・遅延を解消
+        private readonly BlockingCollection<QueueObj> _queue = new BlockingCollection<QueueObj>();
+        private Task _runningTask = null;
+        private readonly CancellationTokenSource _cts = new CancellationTokenSource();
 
         /// <summary>
         /// 処理要求等をEnqueueします。
         /// </summary>
-        /// <param name="obj"></param>
-        /// <param name="ice"></param>
-        /// <returns></returns>
         public bool Enqueue(QueueObj obj, ItemCloneEnum ice = ItemCloneEnum.clone)
         {
             try
             {
                 Log.TR(null, "Enqueue() -->", Log.CP("ItemCloneEnum", ice));
-                if (ice == ItemCloneEnum.clone)
-                {
-                    QueueObj clone = Util.DeepCopy<QueueObj>(obj);
-                    _queue.Enqueue(clone);
-                }
-                else
-                {
-                    _queue.Enqueue(obj);
-                }
+                QueueObj itemToEnqueue = (ice == ItemCloneEnum.clone) ? Util.DeepCopy(obj) : obj;
+
+                _queue.Add(itemToEnqueue);
+
                 Log.TR(null, "Enqueue() <--");
                 return true;
             }
@@ -76,162 +67,67 @@ namespace TaskHelper
         }
 
         /// <summary>
-        /// _queue の先頭を取り出します
-        /// デキューできない時は null を返します
-        /// </summary>
-        /// <param name="ice"></param>
-        /// <returns></returns>
-        private QueueObj TryDequeue(ItemCloneEnum ice = ItemCloneEnum.clone)
-        {
-            QueueObj obj = null;
-            try
-            {
-                Log.TR(null, "TryDequeue() -->", Log.CP("ItemCloneEnum", ice));
-                if (_queue.TryDequeue(out obj))
-                {
-                    if (ice == ItemCloneEnum.clone)
-                    {
-                        QueueObj clone = Util.DeepCopy<QueueObj>(obj);
-                        return clone;
-                    }
-                    else
-                    {
-                        return obj;
-                    }
-                }
-                return null;
-            }
-            catch (Exception ex)
-            {
-                Log.TR_ERR(null, ex);
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// Eventがシグナル状態になるのを待ち合せます
-        /// </summary>
-        /// <param name="millisecondsTimeout"></param>
-        /// <returns></returns>
-        public bool WaitOne(int millisecondsTimeout)
-        {
-            // パラメータのミリ秒指定が 0 以下は、無限待ちとします
-            if (millisecondsTimeout <= 0) millisecondsTimeout = Timeout.Infinite;
-            return _event.WaitOne(millisecondsTimeout);
-        }
-
-
-        /// <summary>
         /// 停止指示します
         /// </summary>
         public void Stop()
         {
             Log.TR_IN(null, "Stop()");
-            StopQueueObj o = new StopQueueObj();
-            Enqueue(o);
-            Set();
+            _queue.Add(new StopQueueObj());
+            _queue.CompleteAdding(); // 新しいアイテムの追加をブロック
         }
 
         /// <summary>
-        /// WaitOne()で待っている処理を実行できるようにします（_event をシグナルにします）
+        /// タスクの完全終了を確実にお見送りするための待ち合わせメソッド
         /// </summary>
-        /// <returns></returns>
-        public bool Set()
+        public async Task WaitForCompletionAsync()
         {
-            Log.TR_IN(null, "Set()");
-            _event.Set();
-            return true;
-        }
-
-        /// <summary>
-        /// Reset()中はWaitOne()は待ちになります（_event は非シグナル状態です）
-        /// </summary>
-        /// <returns></returns>
-        private bool Reset()
-        {
-            return false;
-        }
-
-        static volatile int _Count = 0;
-        /// <summary>
-        /// この関数をオーバーライドします。
-        /// Queueから取り出した処理指示に従った処理を実装します
-        /// </summary>
-        public virtual void Treatment(QueueObj obj = null)
-        {
-            Action asyncProcess = () =>
+            if (_runningTask != null)
             {
-                Log.TR(null, "asyncProcess() start");
-                Thread.Sleep(100);     // 仮
-                _Count++;
-                Log.TR(null, Log.CP("_Count", _Count));
-                Log.TR(null, "asyncProcess() end");
-            };
-
-            asyncProcess();
+                await _runningTask;
+            }
         }
 
         /// <summary>
-        /// Task を作成します。
+        /// 修正(No.2): 呼び出し元が完了を確実に待機(await)できるよう、戻り値を Task に変更
         /// </summary>
-        /// <returns></returns>
-        public Task CreateTask()
+        public virtual async Task TreatmentAsync(QueueObj obj = null)
         {
-            // 非同期処理です
-            Task task = new Task(() =>
-            {
-                Log.TR_IN(null, "task start");
-
-                // _event が シグナル状態になるまで待ちます
-                WaitOne(0);
-
-                do
-                {
-                    QueueObj qo = null;
-                    qo = TryDequeue();
-
-                    // 再度 WaitOne() できるように Reset() します
-                    _event.Reset();
-
-                    if (qo == null) break;
-
-                    if (qo is StopQueueObj)
-                    {
-                        Log.TR(null, "stop request detected(StopQueueObj).");
-                        Log.TR_OUT(null, "task end");
-                        return;
-                    }
-
-                    // 非同期（並列）に処理したい部分を呼び出します。
-                    // （GUI部品にアクセスする場合は、別途Taskを生成して アクセスします）
-                    Treatment(qo);
-
-                } while (true);
-
-                // Taskを作成し、開始します。このスレッドは別のワーカースレッドとして動作します。
-                CreateTask().Start();
-
-                // タスクを終了します
-                Log.TR_OUT(null, "task end");
-                return;
-            });
-
-            Log.TR_OUT(null);
-            return task;
-        }
-
-
-        public PersistentTaskBase()
-        {
-            _event = new ManualResetEvent(false);
+            await Task.Delay(100); // デフォルト実装の仮ディレイ
         }
 
         public void Start()
         {
-            CreateTask().Start();
-        }
+            // 修正(No.1, No.5): 無限再帰を完全に排除。さらに LongRunning を指定してスレッドプールの占有を防ぐ
+            _runningTask = Task.Factory.StartNew(async () =>
+            {
+                Log.TR_IN(null, "task start");
+                try
+                {
+                    // GetConsumingEnumerableは、データが空の時は自動で効率的にスリープし、データが入ると即座に処理します
+                    foreach (var qo in _queue.GetConsumingEnumerable(_cts.Token))
+                    {
+                        if (qo is StopQueueObj)
+                        {
+                            Log.TR(null, "stop request detected(StopQueueObj).");
+                            break;
+                        }
 
-    };
+                        // 修正(No.2): 非同期オーバーライドの完了を正しく追跡して順序を保証
+                        await TreatmentAsync(qo);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    Log.TR(null, "task canceled.");
+                }
+                finally
+                {
+                    Log.TR_OUT(null, "task end");
+                }
+            }, _cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
+        }
+    }
+
     /// <summary>
     /// Task を チェイン実行する仕掛けをサポートします
     /// </summary>
@@ -247,113 +143,69 @@ namespace TaskHelper
             IsEnableCancel = true;
         }
 
-        public Task ForEachAsync(IEnumerable<Func<Task>> tasks, string title)
+        /// <summary>
+        /// 修正(No.6): ContinueWith や Unwrap の複雑な連鎖を完全廃止し、直感的な async/await ループにリファクタリング
+        /// </summary>
+        public async Task ForEachAsync(IEnumerable<Func<Task>> tasks, string title)
         {
             Title = title;
             Log.TR_IN(null, Log.CP("Title", Title));
 
-            var tcs = new TaskCompletionSource<bool>();
-
-            Task currentTask = Task.FromResult(false);
-
-            foreach (Func<Task> function in tasks)
+            try
             {
-                currentTask.ContinueWith((t) =>
+                foreach (Func<Task> function in tasks)
                 {
-                    if (IsEnableException)
-                        tcs.TrySetException(t.Exception.InnerExceptions);
-                    Log.TR(null, "--- OnlyOnFaulted ---"); 
-                }, TaskContinuationOptions.OnlyOnFaulted);
-
-                currentTask.ContinueWith((t) =>
-                {
-                    if (IsEnableCancel)
-                        tcs.TrySetCanceled();
-                    Log.TR(null, "--- OnlyOnCanceled ---");
-                }, TaskContinuationOptions.OnlyOnCanceled);
-
-                Task<Task> continuation = currentTask.ContinueWith((t) =>
-                        function(), TaskContinuationOptions.OnlyOnRanToCompletion);
-
-                currentTask = continuation.Unwrap();
-            }
-
-            //OnlyOnFaulted
-            currentTask.ContinueWith((t) =>
-            {
-                if (IsEnableException)
-                    tcs.TrySetException(t.Exception.InnerExceptions);
-                Log.TR(null, "=== OnlyOnFaulted ===", Log.CP("Title", Title));
-            }, TaskContinuationOptions.OnlyOnFaulted);
-
-            //OnlyOnCanceled
-            currentTask.ContinueWith((t) =>
-            {
-                if (IsEnableCancel)
-                    tcs.TrySetCanceled();
-                Log.TR(null, "=== OnlyOnCanceled ===", Log.CP("Title", Title));
-            }, TaskContinuationOptions.OnlyOnCanceled);
-
-            //OnlyOnRanToCompletion
-            currentTask.ContinueWith((t) =>
-            {
-                tcs.TrySetResult(true);
+                    // 各タスクを順番に実行し、完了を安全に待つ
+                    await function();
+                }
                 Log.TR(null, "=== OnlyOnRanToCompletion ===", Log.CP("Title", Title));
-            }, TaskContinuationOptions.OnlyOnRanToCompletion);
-
-            Log.TR_OUT(null, Log.CP("Title", Title));
-            return tcs.Task;
+            }
+            catch (OperationCanceledException)
+            {
+                Log.TR(null, "=== OnlyOnCanceled ===", Log.CP("Title", Title));
+                if (IsEnableCancel) throw;
+            }
+            catch (Exception ex)
+            {
+                Log.TR(null, "=== OnlyOnFaulted ===", Log.CP("Title", Title));
+                if (IsEnableException) throw;
+            }
+            finally
+            {
+                Log.TR_OUT(null, Log.CP("Title", Title));
+            }
         }
     }
 
     public class ChainTaskRunnerTest
     {
-        /// <summary>
-        /// Taskサンプル
-        /// </summary>
-        /// <returns></returns>
-        private Task GoodTask()
+        private async Task GoodTask()
         {
             Log.TR_IN(null);
-            return Task.Delay(300)
-                .ContinueWith((t) =>
-                {
-                    Log.TR(null, "... processing ...");
-                    Log.TR_OUT(null);
-                });
+            await Task.Delay(300);
+            Log.TR(null, "... processing ...");
+            Log.TR_OUT(null);
         }
 
-        public void Test()
+        public async Task TestAsync()
         {
             ChainTaskRunner ctr = new ChainTaskRunner();
-            List<Func<Task>> list1 = new List<Func<Task>>();
-            list1.Add(() => GoodTask());
+            List<Func<Task>> list2 = new List<Func<Task>> { () => GoodTask() };
 
-            List<Func<Task>> list2 = new List<Func<Task>>();
-            list2.Add(() => GoodTask());
-
-            Task task = ctr.ForEachAsync(list2, "*list2*");
-
-            //Faulted
-            task.ContinueWith((t) =>
+            try
             {
-                Log.TR(null, "+++ Faulted +++");
-                Log.TR(null, t.Exception.ToString());
-            }, TaskContinuationOptions.OnlyOnFaulted);
-
-            //Canceled
-            task.ContinueWith((t) =>
+                await ctr.ForEachAsync(list2, "*list2*");
+                Log.TR(null, "+++ Completion +++");
+            }
+            catch (OperationCanceledException)
             {
                 Log.TR(null, "+++ Canceled +++");
-            }, TaskContinuationOptions.OnlyOnCanceled);
-
-            //Completion
-            task.ContinueWith((t) =>
+            }
+            catch (Exception ex)
             {
-                Log.TR(null, "+++ Completion +++");
-            }, TaskContinuationOptions.OnlyOnRanToCompletion);
-
+                Log.TR(null, "+++ Faulted +++");
+                Log.TR(null, ex.ToString());
+            }
         }
     }
-
 }

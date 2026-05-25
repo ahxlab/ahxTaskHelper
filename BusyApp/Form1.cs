@@ -1,10 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
 using System.Drawing;
-using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Logging4net;
@@ -27,19 +23,19 @@ namespace BusyApp
 
             int x = await doWork();
 
-            Log.TR(this, "<==", Log.CP("x",x));
+            Log.TR(this, "<==", Log.CP("x", x));
             button2.Enabled = true;
         }
 
         private Task<int> doWork()
         {
             return Task.Run(() =>
-                {
-                    Log.TR(this, "==>...doWork()");
-                    System.Threading.Thread.Sleep(10 * 1000);
-                    Log.TR(this, "<==...doWork()");
-                    return 20;
-                });
+            {
+                Log.TR(this, "==>...doWork()");
+                System.Threading.Thread.Sleep(10 * 1000);
+                Log.TR(this, "<==...doWork()");
+                return 20;
+            });
         }
 
         private async void button3_Click(object sender, EventArgs e)
@@ -49,81 +45,70 @@ namespace BusyApp
 
             int sleepSeconds = 5;
 
-            await Task.Run(()=>
-                {
-                    Log.TR(this, "==>...Task.Run()", Log.CP("sleepSeconds",sleepSeconds));
-                    System.Threading.Thread.Sleep(sleepSeconds * 1000);
-                    Log.TR(this, "<==...Task.Run()");
-                });
+            await Task.Run(() =>
+            {
+                Log.TR(this, "==>...Task.Run()", Log.CP("sleepSeconds", sleepSeconds));
+                System.Threading.Thread.Sleep(sleepSeconds * 1000);
+                Log.TR(this, "<==...Task.Run()");
+            });
 
             Log.TR(this, "<==");
             button3.Enabled = true;
         }
 
-        private void button1_Click(object sender, EventArgs e)
+        // 修正: イベントハンドラを async にし、ボタンの多重連打を抑制しながらフリーズを防止
+        private async void button1_Click(object sender, EventArgs e)
         {
-            TestTask tt = new TestTask();
-            tt.Run();
+            button1.Enabled = false;
+            try
+            {
+                TestTask tt = new TestTask();
+                await tt.RunAsync();
+            }
+            finally
+            {
+                button1.Enabled = true;
+            }
         }
-
 
         /// <summary>
         /// Taskテスト用クラス
         /// </summary>
         private class TestTask
         {
-            /// <summary>
-            /// Task生成メソッド
-            /// </summary>
-            /// <param name="count">引数サンプル</param>
-            /// <returns>Taskインスタンス</returns>
-            private Task CreateTask(int count)
+            // 修正: 明示的に Task.Run を用いてスレッドプールで実行するクリーンなファクトリメソッド構造に修正
+            private Task CreateTaskAsync(int count)
             {
-                return new Task(() =>
+                return Task.Run(() =>
                 {
-                    //0-1000ミリ秒待つ
                     int sleepTime = new Random().Next(1000);
                     System.Threading.Thread.Sleep(sleepTime);
 
-                    //引数と現在時間、Sleep時間を表示する
                     Log.TR(this, Log.CP("count", count), Log.CP("経過時間", DateTime.Now.ToString("HH:mm:ss.fff")), Log.CP("Sleep", sleepTime));
                 });
             }
 
             /// <summary>
-            /// Taskテスト
+            /// Taskテスト（非同期・ノンブロッキング版）
             /// </summary>
-            public void Run()
+            public async Task RunAsync()
             {
                 List<Task> tasks = new List<Task>();
 
-                //Taskを10個作成
                 for (int count = 0; count < 10; count++)
                 {
-                    Task newTask = this.CreateTask(count);
-
-                    tasks.Add(newTask);
+                    tasks.Add(this.CreateTaskAsync(count));
                 }
 
-                //Taskを実行
-                foreach (Task task in tasks)
-                {
-                    task.Start();
-                }
-
-                //Taskが終了するまで待つ
-                Task.WaitAll(tasks.ToArray());
+                // 修正: UIスレッドをロックする Task.WaitAll を完全廃止し、ノンブロッキングに同期する WhenAll に変更
+                await Task.WhenAll(tasks);
             }
         }
 
         private void button4_Click(object sender, EventArgs e)
         {
             TestPartial tp = new TestPartial();
-
             tp.TestCallCaller();
         }
-
     }
-
-
 }
