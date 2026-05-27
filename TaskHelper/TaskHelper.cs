@@ -39,7 +39,6 @@ namespace TaskHelper
             clone = 2,
         }
 
-        // 修正(No.4): イベントとQueueをBlockingCollectionに一本化し、データの目詰まり・遅延を解消
         private readonly BlockingCollection<QueueObj> _queue = new BlockingCollection<QueueObj>();
         private Task _runningTask = null;
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
@@ -73,7 +72,7 @@ namespace TaskHelper
         {
             Log.TR_IN(null, "Stop()");
             _queue.Add(new StopQueueObj());
-            _queue.CompleteAdding(); // 新しいアイテムの追加をブロック
+            _queue.CompleteAdding();
         }
 
         /// <summary>
@@ -88,22 +87,22 @@ namespace TaskHelper
         }
 
         /// <summary>
-        /// 修正(No.2): 呼び出し元が完了を確実に待機(await)できるよう、戻り値を Task に変更
+        /// 呼び出し元が完了を確実に待機(await)できるよう、戻り値を Task に変更
         /// </summary>
         public virtual async Task TreatmentAsync(QueueObj obj = null)
         {
-            await Task.Delay(100); // デフォルト実装の仮ディレイ
+            await Task.Delay(100);
         }
 
         public void Start()
         {
-            // 修正(No.1, No.5): 無限再帰を完全に排除。さらに LongRunning を指定してスレッドプールの占有を防ぐ
-            _runningTask = Task.Factory.StartNew(async () =>
+            // 修正(No.9): async ラムダを廃止。同期アクション内で GetAwaiter().GetResult() を呼ぶことで、
+            // 2回目以降のループも含めて、すべての GetConsumingEnumerable() によるブロッキングをこの専用スレッド（LongRunning）に固定します。
+            _runningTask = Task.Factory.StartNew(() =>
             {
                 Log.TR_IN(null, "task start");
                 try
                 {
-                    // GetConsumingEnumerableは、データが空の時は自動で効率的にスリープし、データが入ると即座に処理します
                     foreach (var qo in _queue.GetConsumingEnumerable(_cts.Token))
                     {
                         if (qo is StopQueueObj)
@@ -112,8 +111,8 @@ namespace TaskHelper
                             break;
                         }
 
-                        // 修正(No.2): 非同期オーバーライドの完了を正しく追跡して順序を保証
-                        await TreatmentAsync(qo);
+                        // 専用スレッド上での安全な同期的待機。これによりスレッドプールの枯渇を完全に防ぎます。
+                        TreatmentAsync(qo).GetAwaiter().GetResult();
                     }
                 }
                 catch (OperationCanceledException)
@@ -124,7 +123,7 @@ namespace TaskHelper
                 {
                     Log.TR_OUT(null, "task end");
                 }
-            }, _cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
+            }, _cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default); // Unwrap() も不要になります
         }
     }
 
@@ -143,9 +142,6 @@ namespace TaskHelper
             IsEnableCancel = true;
         }
 
-        /// <summary>
-        /// 修正(No.6): ContinueWith や Unwrap の複雑な連鎖を完全廃止し、直感的な async/await ループにリファクタリング
-        /// </summary>
         public async Task ForEachAsync(IEnumerable<Func<Task>> tasks, string title)
         {
             Title = title;
@@ -155,7 +151,6 @@ namespace TaskHelper
             {
                 foreach (Func<Task> function in tasks)
                 {
-                    // 各タスクを順番に実行し、完了を安全に待つ
                     await function();
                 }
                 Log.TR(null, "=== OnlyOnRanToCompletion ===", Log.CP("Title", Title));
