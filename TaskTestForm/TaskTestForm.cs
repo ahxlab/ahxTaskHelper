@@ -13,7 +13,6 @@ namespace TaskTest
     {
         private LogManager lm = null;
 
-        // === 修正: 戻り値を Task<Result> に変更し Success を返す ===
         public static async Task<Result> GoodFunc()
         {
             Log.TR_IN(null);
@@ -32,7 +31,6 @@ namespace TaskTest
             return Result.Success();
         }
 
-        // === 修正: 内部で発生する例外をキャッチし、例外を投げずにエラーコード(Failure)を返す ===
         public static async Task<Result> ExceptionFunc()
         {
             Log.TR_IN(null);
@@ -46,8 +44,8 @@ namespace TaskTest
             }
             catch (Exception ex)
             {
-                Log.TR_ERR(null, ex); // ログには例外の詳細を残す
-                return Result.Failure("ERR_USER_EXCEPTION", ex.Message); // エラーコードをカプセル化して返却
+                Log.TR_ERR(null, ex);
+                return Result.Failure("ERR_USER_EXCEPTION", ex.Message);
             }
         }
 
@@ -60,8 +58,6 @@ namespace TaskTest
         {
             lm = new LogManager();
             Log.TR(this, "start");
-
-            // 修正(No.7): メモリおよびGDIハンドルリークの解消
             btnChainTasks.Image = new Bitmap("JPEG.JPG");
         }
 
@@ -86,13 +82,13 @@ namespace TaskTest
             }
             btnChainTasks.Image = MakeBitmap(Color.Red, btnChainTasks.Width, btnChainTasks.Height);
 
-            // ★修正: 要求仕様に合わせ、型を List<Func<Task<Result>>> 、変数名を listTasks へ変更
-            List<Func<Task<Result>>> listTasks = new List<Func<Task<Result>>>
+            // 【コンパイルエラー修正】引数に CancellationToken を受け取るように型とラムダ式を変更
+            List<Func<CancellationToken, Task<Result>>> listTasks = new List<Func<CancellationToken, Task<Result>>>
             {
-                () => GoodFunc(),
-                () => GoodFunc2(),
-                () => ExceptionFunc(),
-                () => GoodFunc()
+                ct => GoodFunc(),
+                ct => GoodFunc2(),
+                ct => ExceptionFunc(),
+                ct => GoodFunc()
             };
 
             TaskHelper.ChainTaskRunner cTask = new TaskHelper.ChainTaskRunner
@@ -101,7 +97,7 @@ namespace TaskTest
                 IsEnableException = true
             };
 
-            // 修正: try-catch による例外トラップを廃止し、戻り値の Result を用いて成否を安全に処理
+            // ForEachAsync を呼び出します（第3引数は省略可能ですが default を明示しても動作します）
             Result result = await cTask.ForEachAsync(listTasks, "*listTasks*");
 
             if (result.IsSuccess)
@@ -110,23 +106,20 @@ namespace TaskTest
             }
             else
             {
-                // 例外の代わりに返却されたエラーコードとメッセージを出力・処理
                 Log.TR(null, $"+++ Faulted (Error Handled) +++ Code: {result.ErrorCode}, Message: {result.ErrorMessage}");
             }
         }
 
         private PersistentTask pt = null;
 
-        // 修正: 常駐タスク起動時にボタンを非活性化
         private void btnRegidentTask_Click(object sender, EventArgs e)
         {
-            btnRegidentTask.Enabled = false; // ボタンをdisableにする処理を追加
+            btnRegidentTask.Enabled = false;
 
             pt = new PersistentTask();
             pt.Start();
         }
 
-        // 修正: イベントセット完了時にボタンを活性化状態に戻す
         private void btnSetEvent_Click(object sender, EventArgs e)
         {
             if (pt != null)
@@ -134,7 +127,7 @@ namespace TaskTest
                 pt.Enqueue(new TaskHelper.QueueObj(), TaskHelper.PersistentTaskBase.ItemCloneEnum.direct);
             }
 
-            btnRegidentTask.Enabled = true; // ボタンをenableに戻す処理を追加
+            btnRegidentTask.Enabled = true;
         }
 
         private void TaskTestForm_FormClosing(object sender, FormClosingEventArgs e)
@@ -147,7 +140,6 @@ namespace TaskTest
 
         private async void TaskTestForm_FormClosed(object sender, FormClosedEventArgs e)
         {
-            // 修正(No.3): タスクの終了を確実に同期して待つ
             if (pt != null)
             {
                 await pt.WaitForCompletionAsync();
@@ -169,13 +161,10 @@ namespace TaskTest
             Log.TR_OUT(this);
         }
 
-        /// <summary>
-        /// 修正(No.2): async void から async Task への変更
-        /// </summary>
-        public override async Task TreatmentAsync(TaskHelper.QueueObj obj = null)
+        // 【コンパイルエラー修正】基底クラスの変更に合わせて CancellationToken 引数を追加
+        public override async Task TreatmentAsync(TaskHelper.QueueObj obj = null, CancellationToken cancellationToken = default)
         {
             Log.TR_IN(null);
-            //await heavyProcessAsync_呼び出し元スレッドに復帰指定(2);
             await heavyProcessAsync_呼び元スレッド復帰しない指定(1);
             Log.TR_OUT(null);
         }

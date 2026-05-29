@@ -56,7 +56,6 @@ namespace BusyApp
             button3.Enabled = true;
         }
 
-        // 修正: イベントハンドラを async にし、ボタンの多重連打を抑制しながらフリーズを防止
         private async void button1_Click(object sender, EventArgs e)
         {
             button1.Enabled = false;
@@ -76,7 +75,6 @@ namespace BusyApp
         /// </summary>
         private class TestTask
         {
-            // 修正: 明示的に Task.Run を用いてスレッドプールで実行するクリーンなファクトリメソッド構造に修正
             private Task CreateTaskAsync(int count)
             {
                 return Task.Run(() =>
@@ -88,9 +86,6 @@ namespace BusyApp
                 });
             }
 
-            /// <summary>
-            /// Taskテスト（非同期・ノンブロッキング版）
-            /// </summary>
             public async Task RunAsync()
             {
                 List<Task> tasks = new List<Task>();
@@ -100,7 +95,6 @@ namespace BusyApp
                     tasks.Add(this.CreateTaskAsync(count));
                 }
 
-                // 修正: UIスレッドをロックする Task.WaitAll を完全廃止し、ノンブロッキングに同期する WhenAll に変更
                 await Task.WhenAll(tasks);
             }
         }

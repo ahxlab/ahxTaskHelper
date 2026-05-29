@@ -77,23 +77,17 @@ namespace TaskHelper
             clone = 2,
         }
 
-        // 修正(No.4): イベントとQueueをBlockingCollectionに一本化し、データの目詰まり・遅延を解消
         private readonly BlockingCollection<QueueObj> _queue = new BlockingCollection<QueueObj>();
         private Task _runningTask = null;
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
 
-        /// <summary>
-        /// 処理要求等をEnqueueします。
-        /// </summary>
         public bool Enqueue(QueueObj obj, ItemCloneEnum ice = ItemCloneEnum.clone)
         {
             try
             {
                 Log.TR(null, "Enqueue() -->", Log.CP("ItemCloneEnum", ice));
                 QueueObj itemToEnqueue = (ice == ItemCloneEnum.clone) ? Util.DeepCopy(obj) : obj;
-
                 _queue.Add(itemToEnqueue);
-
                 Log.TR(null, "Enqueue() <--");
                 return true;
             }
@@ -104,19 +98,13 @@ namespace TaskHelper
             }
         }
 
-        /// <summary>
-        /// 停止指示します
-        /// </summary>
         public void Stop()
         {
             Log.TR_IN(null, "Stop()");
             _queue.Add(new StopQueueObj());
-            _queue.CompleteAdding(); // 新しいアイテムの追加をブロック
+            _queue.CompleteAdding();
         }
 
-        /// <summary>
-        /// タスクの完全終了を確実にお見送りするための待ち合わせメソッド
-        /// </summary>
         public async Task WaitForCompletionAsync()
         {
             if (_runningTask != null)
@@ -126,22 +114,20 @@ namespace TaskHelper
         }
 
         /// <summary>
-        /// 修正(No.2): 呼び出し元が完了を確実に待機(await)できるよう、戻り値を Task に変更
+        /// 【コア機能拡張】派生先（プロトコル受信ルーター等）がキャンセル・タイムアウトを検知できるよう、第2引数にトークンを追加
         /// </summary>
-        public virtual async Task TreatmentAsync(QueueObj obj = null)
+        public virtual async Task TreatmentAsync(QueueObj obj = null, CancellationToken cancellationToken = default)
         {
-            await Task.Delay(100); // デフォルト実装の仮ディレイ
+            await Task.Delay(100, cancellationToken);
         }
 
         public void Start()
         {
-            // 修正(No.1, No.5): 無限再帰を完全に排除。さらに LongRunning を指定してスレッドプールの占有を防ぐ
             _runningTask = Task.Factory.StartNew(async () =>
             {
                 Log.TR_IN(null, "task start");
                 try
                 {
-                    // GetConsumingEnumerableは、データが空の時は自動で効率的にスリープし、データが入ると即座に処理します
                     foreach (var qo in _queue.GetConsumingEnumerable(_cts.Token))
                     {
                         if (qo is StopQueueObj)
@@ -150,8 +136,8 @@ namespace TaskHelper
                             break;
                         }
 
-                        // 修正(No.2): 非同期オーバーライドの完了を正しく追跡して順序を保証
-                        await TreatmentAsync(qo);
+                        // 【コア機能拡張】この常駐タスクが持つ _cts.Token を末端の処理へパススルーします
+                        await TreatmentAsync(qo, _cts.Token);
                     }
                 }
                 catch (OperationCanceledException)
@@ -182,21 +168,23 @@ namespace TaskHelper
         }
 
         /// <summary>
-        /// 修正(No.6 改): Func&lt;Task&lt;Result&gt;&gt; をループ実行し、エラーコードを検知したら後続を中断して返却
+        /// 【コア機能拡張】一括キャンセルやタイムアウトを制御できるよう、CancellationToken を引数とデリゲートに追加
         /// </summary>
-        public async Task<Result> ForEachAsync(IEnumerable<Func<Task<Result>>> tasks, string title)
+        public async Task<Result> ForEachAsync(IEnumerable<Func<CancellationToken, Task<Result>>> tasks, string title, CancellationToken cancellationToken = default)
         {
             Title = title;
             Log.TR_IN(null, Log.CP("Title", Title));
 
             try
             {
-                foreach (Func<Task<Result>> function in tasks)
+                foreach (Func<CancellationToken, Task<Result>> func in tasks)
                 {
-                    // 各タスクを実行し、戻り値(Result)を安全に待つ
-                    Result result = await function();
+                    // 次のタスクに移る前に、既にキャンセル要求（タイムアウト含む）が来ていれば即座に離脱
+                    cancellationToken.ThrowIfCancellationRequested();
 
-                    // エラーコードによる失敗を検出した場合は即時離脱（後続は実行しない）
+                    // 各タスクを実行する際、親のトークンをそのまま引き渡して安全に待つ
+                    Result result = await func(cancellationToken);
+
                     if (result.IsFailure)
                     {
                         Log.TR(null, "=== Task Failed (Execution Interrupted) ===", Log.CP("Title", Title), Log.CP("ErrorCode", result.ErrorCode));
@@ -223,34 +211,6 @@ namespace TaskHelper
             finally
             {
                 Log.TR_OUT(null, Log.CP("Title", Title));
-            }
-        }
-    }
-
-    public class ChainTaskRunnerTest
-    {
-        private async Task<Result> GoodTask()
-        {
-            Log.TR_IN(null);
-            await Task.Delay(300);
-            Log.TR(null, "... processing ...");
-            Log.TR_OUT(null);
-            return Result.Success();
-        }
-
-        public async Task TestAsync()
-        {
-            ChainTaskRunner ctr = new ChainTaskRunner();
-            List<Func<Task<Result>>> list2 = new List<Func<Task<Result>>> { () => GoodTask() };
-
-            Result result = await ctr.ForEachAsync(list2, "*list2*");
-            if (result.IsSuccess)
-            {
-                Log.TR(null, "+++ Completion +++");
-            }
-            else
-            {
-                Log.TR(null, $"+++ Faulted +++ ErrorCode: {result.ErrorCode}");
             }
         }
     }
