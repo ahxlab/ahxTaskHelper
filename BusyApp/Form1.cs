@@ -1,6 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Drawing;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Logging4net;
@@ -9,10 +7,14 @@ namespace BusyApp
 {
     public partial class Form1 : Form
     {
-        LogManager lm = null;
+        private readonly LogManager _lm = null;
+
+        // ビジネスロジックを担当するワーカークラスのインスタンスを生成
+        private readonly BusyAppWorker _worker = new BusyAppWorker();
+
         public Form1()
         {
-            lm = new LogManager();
+            _lm = new LogManager();
             InitializeComponent();
         }
 
@@ -21,21 +23,11 @@ namespace BusyApp
             Log.TR(this, "==>");
             button2.Enabled = false;
 
-            int x = await doWork();
+            // 処理ロジックをワーカーに委譲
+            int x = await _worker.DoWorkAsync(this);
 
             Log.TR(this, "<==", Log.CP("x", x));
             button2.Enabled = true;
-        }
-
-        private Task<int> doWork()
-        {
-            return Task.Run(() =>
-            {
-                Log.TR(this, "==>...doWork()");
-                System.Threading.Thread.Sleep(10 * 1000);
-                Log.TR(this, "<==...doWork()");
-                return 20;
-            });
         }
 
         private async void button3_Click(object sender, EventArgs e)
@@ -45,12 +37,8 @@ namespace BusyApp
 
             int sleepSeconds = 5;
 
-            await Task.Run(() =>
-            {
-                Log.TR(this, "==>...Task.Run()", Log.CP("sleepSeconds", sleepSeconds));
-                System.Threading.Thread.Sleep(sleepSeconds * 1000);
-                Log.TR(this, "<==...Task.Run()");
-            });
+            // 処理ロジックをワーカーに委譲
+            await _worker.SleepAsync(this, sleepSeconds);
 
             Log.TR(this, "<==");
             button3.Enabled = true;
@@ -61,41 +49,12 @@ namespace BusyApp
             button1.Enabled = false;
             try
             {
-                TestTask tt = new TestTask();
-                await tt.RunAsync();
+                // テストタスクの実行をワーカーに委譲
+                await _worker.RunTestTasksAsync();
             }
             finally
             {
                 button1.Enabled = true;
-            }
-        }
-
-        /// <summary>
-        /// Taskテスト用クラス
-        /// </summary>
-        private class TestTask
-        {
-            private Task CreateTaskAsync(int count)
-            {
-                return Task.Run(() =>
-                {
-                    int sleepTime = new Random().Next(1000);
-                    System.Threading.Thread.Sleep(sleepTime);
-
-                    Log.TR(this, Log.CP("count", count), Log.CP("経過時間", DateTime.Now.ToString("HH:mm:ss.fff")), Log.CP("Sleep", sleepTime));
-                });
-            }
-
-            public async Task RunAsync()
-            {
-                List<Task> tasks = new List<Task>();
-
-                for (int count = 0; count < 10; count++)
-                {
-                    tasks.Add(this.CreateTaskAsync(count));
-                }
-
-                await Task.WhenAll(tasks);
             }
         }
 
